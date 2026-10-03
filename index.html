@@ -140,11 +140,21 @@ window.AvaliacaoTreinoSync = (function () {
     return value;
   }
   function normal(name) { return String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+  function isLinked(record, studentId) {
+    return !!studentId && (record.treinoStudentId === studentId || (Array.isArray(record.treinoStudentIds) && record.treinoStudentIds.includes(studentId)));
+  }
+  function link(record, studentId) {
+    var ids = Array.isArray(record.treinoStudentIds) ? record.treinoStudentIds.slice() : [];
+    if (record.treinoStudentId) ids.push(record.treinoStudentId);
+    ids.push(studentId);
+    record.treinoStudentIds = Array.from(new Set(ids));
+    if (!record.treinoStudentId) record.treinoStudentId = ids[0];
+  }
   function find(records, student) {
-    var linked = records.filter(function (a) { return a.treinoStudentId === student.student_id; });
+    var linked = records.filter(function (a) { return isLinked(a, student.student_id); });
     if (linked.length === 1) return linked[0];
     if (linked.length > 1) throw Error('Há mais de um cadastro vinculado a este aluno. Confira os cadastros na Avaliação.');
-    var matches = records.filter(function (a) { return !a.treinoStudentId && normal(a.nome) === normal(student.nome); });
+    var matches = records.filter(function (a) { return normal(a.nome) === normal(student.nome); });
     if (matches.length > 1) throw Error('Há alunos com o mesmo nome na Avaliação. Diferencie os nomes antes de vincular.');
     return matches[0] || null;
   }
@@ -185,7 +195,7 @@ window.AvaliacaoTreinoSync = (function () {
     var students = read('treinoAlunos'), changed = false;
     students.forEach(function (student) {
       if (!student.student_id) return;
-      var record = records.find(function (a) { return a.treinoStudentId === student.student_id; });
+      var record = records.find(function (a) { return isLinked(a, student.student_id); });
       if (!record) return;
       var before = JSON.stringify(student);
       toFicha(student, record);
@@ -193,7 +203,7 @@ window.AvaliacaoTreinoSync = (function () {
     });
     if (changed) localStorage.setItem('treinoAlunos', JSON.stringify(students));
   }
-  return {key:key, read:read, find:find, fromFicha:fromFicha, toFicha:toFicha, syncTraining:syncTraining};
+  return {key:key, read:read, find:find, isLinked:isLinked, link:link, fromFicha:fromFicha, toFicha:toFicha, syncTraining:syncTraining};
 })();
 
 </script>
@@ -1834,13 +1844,14 @@ function abrirAlunoDoTreino() {
   try {
     const student = AvaliacaoTreinoSync.read('treinoAlunos').find(a => a.student_id === studentId);
     if (!student) throw Error('Aluno não encontrado neste navegador. Abra a avaliação pelo Treino36.');
-    let record = AvaliacaoTreinoSync.find(alunos, student);
+    let record = alunos.find(a => AvaliacaoTreinoSync.isLinked(a, studentId));
+    if (!record && alunos.length && avaliacaoParams.get('novoCadastro') !== '1') throw Error('Confirme no Treino36 qual pessoa corresponde a este treino antes de sincronizar.');
     if (!record) {
       record = {id:Date.now(), nome:student.nome, sexo:'M', avaliacoes:[]};
       AvaliacaoTreinoSync.fromFicha(student, record, student.infoRelevante || (student.infoGuias || [])[0] || {});
       alunos.push(record);
     }
-    record.treinoStudentId = studentId;
+    AvaliacaoTreinoSync.link(record, studentId);
     avaliacaoEmbedId = record.id;
     alunoAtivoId = record.id;
     salvarDados();
