@@ -128,6 +128,75 @@
       .badge{font-size:6pt;padding:2px 5px;margin-left:5px}
     }
   </style>
+<script>
+
+/* A mesma avaliação é usada pelo aplicativo e pelo formulário dentro do treino.
+   GitHub Pages do mesmo usuário compartilha a origem e o localStorage. */
+window.AvaliacaoTreinoSync = (function () {
+  var key = 'avaliacao_fisica_alunos';
+  function read(k) {
+    var value = JSON.parse(localStorage.getItem(k) || '[]');
+    if (!Array.isArray(value)) throw Error('Cadastro inválido. Importe um backup válido antes de continuar.');
+    return value;
+  }
+  function normal(name) { return String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().replace(/\s+/g, ' ').toLowerCase(); }
+  function find(records, student) {
+    var linked = records.filter(function (a) { return a.treinoStudentId === student.student_id; });
+    if (linked.length === 1) return linked[0];
+    if (linked.length > 1) throw Error('Há mais de um cadastro vinculado a este aluno. Confira os cadastros na Avaliação.');
+    var matches = records.filter(function (a) { return !a.treinoStudentId && normal(a.nome) === normal(student.nome); });
+    if (matches.length > 1) throw Error('Há alunos com o mesmo nome na Avaliação. Diferencie os nomes antes de vincular.');
+    return matches[0] || null;
+  }
+  function number(value) {
+    var m = String(value || '').replace(',', '.').match(/\d+(?:\.\d+)?/);
+    return m ? m[0] : '';
+  }
+  function fromFicha(student, record, ficha, previous) {
+    var map = { idade:'idade', altura:'altura', dataNasc:'nasc', nomeCompleto:'nome', whats:'whatsapp', email:'email' };
+    Object.keys(map).forEach(function (field) {
+      if (previous && ficha[field] === previous[field]) return;
+      var value = ficha[field] || '';
+      if (field === 'nomeCompleto' && !value) return;
+      if (field === 'altura') { value = number(value); if (Number(value) > 3) value = String(Number(value) / 100); }
+      if (field === 'idade') value = number(value);
+      record[map[field]] = value;
+    });
+    if (!previous || ficha.peso !== previous.peso) {
+      var latest = (record.avaliacoes || []).slice(-1)[0];
+      if (latest) latest.peso = number(ficha.peso);
+      else record.pesoIni = number(ficha.peso);
+    }
+  }
+  function toFicha(student, record) {
+    var guias = student.infoGuias || [];
+    var ficha = guias.find(function (g) { return g.id === student.avaliacaoFichaId; }) || guias[0];
+    if (!ficha) { ficha = Object.assign({id:'1', titulo:'Ficha 1'}, student.infoRelevante || {}); guias.push(ficha); }
+    student.infoGuias = guias;
+    student.avaliacaoFichaId = ficha.id;
+    var latest = (record.avaliacoes || []).slice(-1)[0];
+    Object.assign(ficha, {idade:record.idade || '', altura:record.altura || '', dataNasc:record.nasc || '', nomeCompleto:record.nome || '', whats:record.whatsapp || '', email:record.email || '', peso:latest ? (latest.peso || '') : (record.pesoIni || '')});
+    student.infoRelevante = Object.assign({}, ficha);
+    student.whatsapp = record.whatsapp || '';
+    student.avaliacaoId = record.id;
+    return ficha;
+  }
+  function syncTraining(records) {
+    var students = read('treinoAlunos'), changed = false;
+    students.forEach(function (student) {
+      if (!student.student_id) return;
+      var record = records.find(function (a) { return a.treinoStudentId === student.student_id; });
+      if (!record) return;
+      var before = JSON.stringify(student);
+      toFicha(student, record);
+      if (before !== JSON.stringify(student)) changed = true;
+    });
+    if (changed) localStorage.setItem('treinoAlunos', JSON.stringify(students));
+  }
+  return {key:key, read:read, find:find, fromFicha:fromFicha, toFicha:toFicha, syncTraining:syncTraining};
+})();
+
+</script>
 </head>
 <body>
 
@@ -451,10 +520,11 @@ function carregarDados(){
   if(saved){
     try{ alunos=JSON.parse(saved); }catch(e){ alunos=[]; notifMsg('⚠️ Erro ao carregar dados'); }
   }
-  if(!alunos.length){
+  if(!alunos.length && !new URLSearchParams(location.search).get('treinoStudentId')){
     alunos=[{id:Date.now(),nome:'João Silva',nasc:'',idade:'',altura:'',pesoIni:'',sexo:'M',whatsapp:'',valorPago:'',renovacaoDias:'',pagamentoTipo:'',pagamentoData1:'',pagamentoData2:'',avaliacoes:[]}];
   }
   alunoAtivoId=null;
+  alunos.forEach(a => (a.avaliacoes || []).forEach(av => calcularIMCeDobras(a, av.id)));
   salvarDados();
   filtrarAlunos();
   if('Notification' in window){
@@ -466,7 +536,9 @@ function carregarDados(){
 
 function salvarDados(){
   try {
-    localStorage.setItem('avaliacao_fisica_alunos',JSON.stringify(alunos));
+    const serialized = JSON.stringify(alunos);
+    if (localStorage.getItem('avaliacao_fisica_alunos') !== serialized) localStorage.setItem('avaliacao_fisica_alunos', serialized);
+    AvaliacaoTreinoSync.syncTraining(alunos);
   } catch(e) {
     if(e.name === 'QuotaExceededError') {
       notifMsg('⚠️ Espaço insuficiente no armazenamento. Fotos muito grandes?');
@@ -805,6 +877,7 @@ function atualizarAluno(id,campo,valor){
       if(el) el.value=idadeCalc;
     }
   }
+  if (['altura','idade','nasc','sexo'].includes(campo)) (aluno.avaliacoes || []).forEach(av => calcularIMCeDobras(aluno, av.id));
   salvarDados();
   if(campo!=='nasc') filtrarAlunos();
 }
@@ -864,6 +937,8 @@ function syncAvaliacao(alunoId,avId,campo,valor){
   const av=aluno.avaliacoes.find(a=>a.id===avId);
   if(!av) return;
   av[campo]=valor;
+  calcularIMCeDobras(aluno,avId);
+  salvarDados();
   if(timeoutDobras) clearTimeout(timeoutDobras);
   timeoutDobras=setTimeout(()=>{
     calcularIMCeDobras(aluno,avId);
@@ -905,7 +980,7 @@ function calcularIMCeDobras(aluno,avId){
   const av=aluno.avaliacoes.find(a=>a.id===avId);
   if(!av) return;
   const altura=pf(aluno.altura), peso=pf(av.peso);
-  if(!isNaN(altura)&&!isNaN(peso)&&altura>0) av.imc=(peso/(altura*altura)).toFixed(1);
+  av.imc = !isNaN(altura)&&!isNaN(peso)&&altura>0 ? (peso/(altura*altura)).toFixed(1) : '';
   const idade=pf(aluno.idade);
   av.tmb=calcularTMB(aluno.sexo,idade,peso,altura);
   // fallback: idade metabólica pelo % gordura manual (balança) — sobrescrita abaixo se as dobras forem calculadas
@@ -1539,6 +1614,10 @@ function getImgDataURL(src){
 
 /* ORDENAÇÃO E FILTRAGEM */
 function ordenarAlunos(){
+  if (avaliacaoEmbedId !== null) {
+    renderizarAlunos(alunos.filter(a => a.id === avaliacaoEmbedId));
+    return;
+  }
   currentOrdem = document.getElementById('ordemAluno').value;
   currentBusca = document.getElementById('buscaAluno').value.toLowerCase();
   let alunosFiltrados = alunos.filter(a => a.nome.toLowerCase().includes(currentBusca));
@@ -1745,6 +1824,54 @@ function renderizarAlunos(alunosParaRenderizar){
   });
 }
 
+
+/* Integração com o Treino36; IDs persistentes evitam vínculos trocados ao renomear. */
+let avaliacaoEmbedId = null;
+const avaliacaoParams = new URLSearchParams(location.search);
+function abrirAlunoDoTreino() {
+  const studentId = avaliacaoParams.get('treinoStudentId');
+  if (!studentId) return;
+  try {
+    const student = AvaliacaoTreinoSync.read('treinoAlunos').find(a => a.student_id === studentId);
+    if (!student) throw Error('Aluno não encontrado neste navegador. Abra a avaliação pelo Treino36.');
+    let record = AvaliacaoTreinoSync.find(alunos, student);
+    if (!record) {
+      record = {id:Date.now(), nome:student.nome, sexo:'M', avaliacoes:[]};
+      AvaliacaoTreinoSync.fromFicha(student, record, student.infoRelevante || (student.infoGuias || [])[0] || {});
+      alunos.push(record);
+    }
+    record.treinoStudentId = studentId;
+    avaliacaoEmbedId = record.id;
+    alunoAtivoId = record.id;
+    salvarDados();
+    filtrarAlunos();
+    const latest = (record.avaliacoes || []).slice(-1)[0];
+    if (latest) document.getElementById(`av-item-${latest.id}`)?.classList.add('expanded');
+  } catch (e) {
+    document.getElementById('alunosList').textContent = e.message;
+  }
+}
+if (avaliacaoParams.get('embed') === 'treino36') {
+  document.documentElement.classList.add('avaliacao-embed');
+  const style = document.createElement('style');
+  style.textContent = '.avaliacao-embed .page-header,.avaliacao-embed .controles-header,.avaliacao-embed #bannerRenovacao,.avaliacao-embed .btn-topo{display:none}.avaliacao-embed body{padding:8px}.avaliacao-embed .alunos-grid{display:block}';
+  document.head.appendChild(style);
+}
+window.addEventListener('storage', function (event) {
+  if (event.key !== AvaliacaoTreinoSync.key) return;
+  try {
+    // Os valores já são persistidos; cancelar apenas a atualização visual pendente.
+    if (timeoutDobras) { clearTimeout(timeoutDobras); timeoutDobras = null; }
+    alunos = AvaliacaoTreinoSync.read(AvaliacaoTreinoSync.key);
+    alunos.forEach(a => (a.avaliacoes || []).forEach(av => calcularIMCeDobras(a, av.id)));
+    salvarDados();
+    filtrarAlunos();
+  } catch (e) { notifMsg('⚠️ ' + e.message); }
+});
+window.addEventListener('pagehide', function () {
+  if (timeoutDobras) { clearTimeout(timeoutDobras); timeoutDobras = null; salvarDados(); }
+});
+
 /* INICIALIZAÇÃO */
 document.getElementById('btnNovoAluno').addEventListener('click',function(e){
   e.preventDefault();
@@ -1761,6 +1888,7 @@ document.getElementById('ordemAluno').addEventListener('change', function(){
 });
 
 carregarDados();
+abrirAlunoDoTreino();
 </script>
 </body>
 </html>
